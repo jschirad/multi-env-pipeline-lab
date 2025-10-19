@@ -1,0 +1,208 @@
+name: Multi-Environment CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+      - 'environments/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+jobs:
+  # Job 1: Validate all manifests
+  validate:
+    name: 🔍 Validate Manifests
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Validate dev manifests
+        run: |
+          echo "Validating dev environment..."
+          kubectl kustomize environments/dev | kubectl apply --dry-run=client -f -
+      
+      - name: Validate staging manifests
+        run: |
+          echo "Validating staging environment..."
+          kubectl kustomize environments/staging | kubectl apply --dry-run=client -f -
+      
+      - name: Validate prod manifests
+        run: |
+          echo "Validating production environment..."
+          kubectl kustomize environments/prod | kubectl apply --dry-run=client -f -
+      
+      - name: ✅ Validation complete
+        run: echo "✅ All manifests are valid!"
+
+  # Job 2: Security scanning
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run Trivy security scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+      
+      - name: ✅ Security scan complete
+        run: echo "✅ Security scan completed!"
+
+  # Job 3: Deploy to Dev (automatic)
+  deploy-dev:
+    name: 🚀 Deploy to Dev
+    needs: [validate, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: self-hosted
+    environment:
+      name: dev
+      url: http://dev.local
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Dev
+        run: |
+          echo "🚀 Deploying to dev environment..."
+          kubectl apply -k environments/dev
+      
+      - name: Wait for rollout
+        run: |
+          echo "⏳ Waiting for deployment to complete..."
+          kubectl rollout status deployment/dev-webapp -n dev --timeout=5m
+      
+      - name: Verify deployment
+        run: |
+          echo "✅ Verifying deployment..."
+          kubectl get pods -n dev -l app=webapp
+          kubectl get svc -n dev
+      
+      - name: ✅ Dev deployment complete
+        run: echo "✅ Successfully deployed to dev environment!"
+
+  # Job 4: Integration Tests
+  integration-tests:
+    name: 🧪 Integration Tests
+    needs: deploy-dev
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Run health checks
+        run: |
+          echo "🧪 Running health checks..."
+          chmod +x scripts/health-check.sh
+          ./scripts/health-check.sh dev dev-webapp-service
+      
+      - name: Run integration tests
+        run: |
+          echo "🧪 Running integration tests..."
+          
+          # Simple connectivity test
+          POD_NAME=$(kubectl get pod -n dev -l app=webapp -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec -n dev $POD_NAME -- wget -q -O- http://localhost:80 > /dev/null && echo "✅ Pod connectivity test passed"
+          
+          # Service test
+          kubectl run test-curl --rm -i --restart=Never --image=curlimages/curl:latest -n dev -- \
+            curl -f -s http://dev-webapp-service.dev.svc.cluster.local && echo "✅ Service test passed"
+      
+      - name: ✅ Tests complete
+        run: echo "✅ All integration tests passed!"
+
+  # Job 5: Deploy to Staging (automatic after tests)
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    needs: integration-tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: self-hosted
+    environment:
+      name: staging
+      url: http://staging.local
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Staging
+        run: |
+          echo "🚀 Deploying to staging environment..."
+          kubectl apply -k environments/staging
+      
+      - name: Wait for rollout
+        run: |
+          echo "⏳ Waiting for deployment to complete..."
+          kubectl rollout status deployment/staging-webapp -n staging --timeout=5m
+      
+      - name: Verify staging deployment
+        run: |
+          echo "✅ Verifying deployment..."
+          kubectl get pods -n staging -l app=webapp
+          kubectl get svc -n staging
+      
+      - name: ✅ Staging deployment complete
+        run: echo "✅ Successfully deployed to staging environment!"
+
+  # Job 6: Deploy to Production (manual approval required)
+  deploy-prod:
+    name: 🚀 Deploy to Production
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: self-hosted
+    environment:
+      name: production
+      url: http://prod.local
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to Production
+        run: |
+          echo "🚀 Deploying to production environment..."
+          kubectl apply -k environments/prod
+      
+      - name: Wait for rollout
+        run: |
+          echo "⏳ Waiting for deployment to complete..."
+          kubectl rollout status deployment/prod-webapp -n prod --timeout=5m
+      
+      - name: Verify production deployment
+        run: |
+          echo "✅ Verifying deployment..."
+          kubectl get pods -n prod -l app=webapp
+          kubectl get svc -n prod
+      
+      - name: Create deployment summary
+        run: |
+          echo "## 🎉 Production Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Author:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployed Resources" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get all -n prod -l app=webapp >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      
+      - name: ✅ Production deployment complete
+        run: echo "✅ Successfully deployed to production environment!"
