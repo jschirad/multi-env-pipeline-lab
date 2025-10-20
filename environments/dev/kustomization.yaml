@@ -17,7 +17,7 @@ configMapGenerator:
     behavior: merge
     literals:
       - ENVIRONMENT=development
-      - VERSION=dev-v1.1.0
+      - VERSION=dev-v1.1.1
       - LOG_LEVEL=debug
       - FEATURE_FLAG_NEW_UI=true
 
